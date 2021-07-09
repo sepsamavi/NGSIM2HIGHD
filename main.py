@@ -31,6 +31,6 @@ import NGSIM_Columns as NC
 
 highd_dir="/Volumes/GoogleDrive/My Drive/Research/Masters Project (Human-likeness & IRL)/IRL Unpredictability approach/Datasets/highD/highD-dataset-v1.0/data/"
 
-converter = HighD2NGSIM(range(1,3), highd_dir)
+converter = HighD2NGSIM(range(1,61), highd_dir)
 
 converter.convert()

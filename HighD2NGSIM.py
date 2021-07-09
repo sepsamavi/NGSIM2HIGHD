@@ -1,10 +1,10 @@
-import os
 import pandas as pd
 import numpy as np
 import HighD_Columns as HC
 import NGSIM_Columns as NC
 import NGSIM_MetaInfo as NMeta
-NC_LIST =[NC.ID,  NC.FRAME,  NC.TOTAL_FRAME,  NC.GLOBAL_TIME,  NC.X,  NC.Y,  NC.GLOBAL_X,  NC.GLOBAL_Y,  NC.LENGTH,  NC.WIDTH,  NC.CLASS,  NC.VELOCITY,  NC.ACCELERATION,  NC.LANE_ID,  NC.PRECEDING_ID,  NC.FOLLOWING_ID,  NC.LOCATION,  NC.O_ZONE,  NC.D_ZONE,  NC.INT_ID,  NC.SECTION_ID,  NC.DIRECTION,  NC.MOVEMENT,  NC.DHW, NC.THW]
+# NC_LIST =[NC.ID,  NC.FRAME,  NC.TOTAL_FRAME,  NC.GLOBAL_TIME,  NC.X,  NC.Y,  NC.GLOBAL_X,  NC.GLOBAL_Y,  NC.LENGTH,  NC.WIDTH,  NC.CLASS,  NC.VELOCITY,  NC.ACCELERATION,  NC.LANE_ID,  NC.PRECEDING_ID,  NC.FOLLOWING_ID,  NC.LOCATION,  NC.O_ZONE,  NC.D_ZONE,  NC.INT_ID,  NC.SECTION_ID,  NC.DIRECTION,  NC.MOVEMENT,  NC.DHW, NC.THW]
+NC_LIST =[NC.ID,  NC.FRAME,   NC.X,  NC.Y,  NC.LENGTH,  NC.WIDTH,  NC.CLASS,  NC.VELOCITY,  NC.ACCELERATION,  NC.LANE_ID,  NC.PRECEDING_ID,  NC.FOLLOWING_ID]
 class HighD2NGSIM:
     def __init__(self, highD_tracks_csv_num_list, highD_filedir):
         self.highD_filedir=highD_filedir
@@ -23,7 +23,10 @@ class HighD2NGSIM:
             self.highD_tracks.append(pd.read_csv(self.highD_filedir+"{:02d}".format(ds_id)+"_tracks.csv"))
             print("Read {:02d}".format(ds_id))
             # print(self.highD_recordingMetas[ds_id-1].frameRate.iloc[0])
-            ngsim_values = self.transform_values(ds_id)
+            right_tracks_NGSIMFormat, left_tracks_NGSIMFormat = self.transform_values(ds_id)
+
+            right_tracks_NGSIMFormat.to_csv(self.highD_filedir+"NGSIMFormat/DS{:02d}".format(ds_id)+"_right.csv")
+            left_tracks_NGSIMFormat.to_csv(self.highD_filedir+"NGSIMFormat/DS{:02d}".format(ds_id)+"_left.csv")
 
         return
 
@@ -32,33 +35,84 @@ class HighD2NGSIM:
         tracksMeta = self.highD_tracksMetas[ds_id - 1]
         tracks = self.highD_tracks[ds_id - 1]
 
-        ngsim_df = pd.DataFrame(columns=NC_LIST)
-
         # Adding a time for future re-sampling:
         # tracks['TimeIdx'] = pd.TimedeltaIndex(data=(tracks[HC.FRAME]-1) * 1/recordingMeta[HC.FRAME_RATE].iloc[0], unit='s', freq='infer')
-        tracks['temp_TimeStamp'] = pd.to_datetime((tracks[HC.FRAME]-1) * 1/recordingMeta[HC.FRAME_RATE].iloc[0], unit="s")
-        tracks['TimeStamp'] = (tracks[HC.FRAME] - 1) * 1 / recordingMeta[HC.FRAME_RATE].iloc[0]
+        tracks["temp_TimeStamp"] = pd.to_datetime((tracks[HC.FRAME]-1) * 1/recordingMeta[HC.FRAME_RATE].iloc[0], unit="s")
+        tracks["TimeStamp"] = (tracks[HC.FRAME] - 1) * 1 / recordingMeta[HC.FRAME_RATE].iloc[0]
         tracks = tracks.set_index('temp_TimeStamp')
-        # tracks['PeriodIdx'] = pd.PeriodIndex(tracks[HC.FRAME], freq="0.04s")
 
+        # tracks['PeriodIdx'] = pd.PeriodIndex(tracks[HC.FRAME], freq="0.04s")
         right_tracks_ids = tracksMeta.loc[tracksMeta[HC.DRIVING_DIRECTION] == 2, HC.TRACK_ID].unique() # need to rotate pi/2 CCW
         left_tracks_ids = tracksMeta.loc[tracksMeta[HC.DRIVING_DIRECTION] == 1, HC.TRACK_ID].unique() # need to rotate pi/2 CW
 
         right_tracks = tracks[tracks[HC.TRACK_ID].isin(right_tracks_ids)]
         left_tracks = tracks[tracks[HC.TRACK_ID].isin(left_tracks_ids)]
 
-        right_resampled_tracks = self.resample(right_tracks)
-        left_resampled_tracks = self.resample(left_tracks)
+        # Resample & interpolate to the sampling rate of the NGSIM dataset
+        right_resampled_tracks = self.resample(right_tracks, tracksMeta)
+        left_resampled_tracks = self.resample(left_tracks, tracksMeta)
+
+        # Rotate tracks to match NGSIM and
+        right_rotated_tsfd = self.rotate_tsf_tracks(right_resampled_tracks, np.pi/2)
+        left_rotated_tsfd = self.rotate_tsf_tracks(left_resampled_tracks, -np.pi/2)
+
+        return right_rotated_tsfd, left_rotated_tsfd
+
+    def rotate_tsf_tracks(self, tracks, angle):
+        # Change locations
+        # Move point from upper left corner in image coordinates to the middle front of the car
+        tracks_NGSIMformat = pd.DataFrame(columns=NC_LIST)
+        if angle == np.pi/2:
+            tracks_X_Temp = tracks[HC.X]+tracks[HC.WIDTH]
+        else:
+            tracks_X_Temp = tracks[HC.X]
+        tracks_Y_Temp = tracks[HC.Y]-0.5*tracks[HC.HEIGHT]
+
+        # Rotate with respect to Image coordinates and convert to feet, use NGSIM title
+        tracks_NGSIMformat[NC.X] = (tracks_X_Temp*np.cos(angle) - tracks_Y_Temp*np.sin(angle))*NMeta.FEET_PER_METRE
+        tracks_NGSIMformat[NC.Y] = (tracks_X_Temp*np.sin(angle) + tracks_Y_Temp*np.cos(angle))*NMeta.FEET_PER_METRE
+
+
+        ## Add rest of the relevant information in NGSIM format
+        # Add vehicle ID - matching to track ID
+        tracks_NGSIMformat[NC.ID] = tracks[HC.TRACK_ID]
+
+        # Adding Frame_ID info: NB: using the resampled IDs
+        tracks_NGSIMformat[NC.FRAME] = tracks["resampled_Frame_ID"]
+
+        # Add width and length and convert to feet
+        tracks_NGSIMformat[NC.WIDTH] = tracks[HC.HEIGHT]*NMeta.FEET_PER_METRE
+        tracks_NGSIMformat[NC.LENGTH] = tracks[HC.WIDTH]*NMeta.FEET_PER_METRE
+
+        # Add vehicle class
+        tracks["Class_num"] = 0
+        tracks.loc[(tracks[HC.CLASS].str.match("Car"), "Class_num")] = 2
+        tracks.loc[(tracks[HC.CLASS].str.match("Truck"), "Class_num")] = 3
+        tracks_NGSIMformat[NC.CLASS] = tracks["Class_num"]
+
+        # Add velocity and convert to feet/s
+        tracks_NGSIMformat[NC.VELOCITY] = (tracks[HC.X_VELOCITY]**2 + tracks[HC.Y_VELOCITY]**2)**0.5*NMeta.FEET_PER_METRE
+
+        # Add acceleration and convert ot feet/s^2
+        tracks_NGSIMformat[NC.ACCELERATION] = (tracks[HC.X_ACCELERATION]**2 + tracks[HC.Y_ACCELERATION]**2)**0.5*NMeta.FEET_PER_METRE
+
+        # Add lane ID:
+        tracks_NGSIMformat[NC.LANE_ID] = tracks[HC.LANE_ID]
+
+        # Add preceding and following IDs:
+        tracks_NGSIMformat[NC.PRECEDING_ID] = tracks[HC.PRECEDING_ID]
+        tracks_NGSIMformat[NC.FOLLOWING_ID] = tracks[HC.FOLLOWING_ID]
+
+        return tracks_NGSIMformat
 
 
 
-
-    def resample(self, tracks):
+    def resample(self, tracks, tracksMeta):
         # Resample each track in the groupby to the sampling rate of NGSIM
         # Return a new tracks dataframe
         resampled_tracks = pd.DataFrame(columns=tracks.columns)
         for track_id, track in tracks.groupby(HC.TRACK_ID):
-            print("Track id: "+str(track_id))
+            # print("Track id: "+str(track_id))
             # Upsampling to interpolate at intervals of 0.02s, which is divisible by 0.1s
             double_index = pd.date_range(start=pd.to_datetime(track["TimeStamp"].iloc[0],unit="s"), end=pd.to_datetime(track["TimeStamp"].iloc[-1],unit="s"), freq="20L")
             upsampled_track = track.reindex(double_index)
@@ -92,6 +146,8 @@ class HighD2NGSIM:
             # Downsampling to NGSIM freq
             new_index=pd.date_range(start=pd.to_datetime(track["TimeStamp"].iloc[0],unit="s"), end=pd.to_datetime(track["TimeStamp"].iloc[-1],unit="s"), freq=str(int(1/NMeta.NGSIM_FRAME_RATE*1000))+"L")
             resampled_track = upsampled_track.reindex(new_index)
+            # Move track class from meta information to the actual track
+            resampled_track[HC.CLASS] = tracksMeta.loc[(tracksMeta[HC.TRACK_ID] == track_id,HC.CLASS)].iloc[0]
             resampled_track.set_index(np.arange(0,resampled_track.shape[0]))
             resampled_tracks = resampled_tracks.append(resampled_track, ignore_index=True)
         resampled_tracks["resampled_Frame_ID"] = pd.Series(resampled_tracks["TimeStamp"]*NMeta.NGSIM_FRAME_RATE, dtype=int)
