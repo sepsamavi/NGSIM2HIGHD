@@ -1,0 +1,1 @@
+NGSIM_FRAME_RATE = 10 #hz
