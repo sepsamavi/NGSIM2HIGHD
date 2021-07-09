@@ -80,6 +80,9 @@ class HighD2NGSIM:
         # Adding Frame_ID info: NB: using the resampled IDs
         tracks_NGSIMformat[NC.FRAME] = tracks["resampled_Frame_ID"]
 
+        # Adding Global Time in milliseconds using the timestamp defined in seconds in resample function
+        tracks_NGSIMformat[NC.GLOBAL_TIME] = tracks["TimeStamp"]*1000
+
         # Add width and length and convert to feet
         tracks_NGSIMformat[NC.WIDTH] = tracks[HC.HEIGHT]*NMeta.FEET_PER_METRE
         tracks_NGSIMformat[NC.LENGTH] = tracks[HC.WIDTH]*NMeta.FEET_PER_METRE
@@ -97,8 +100,24 @@ class HighD2NGSIM:
         tracks_NGSIMformat[NC.ACCELERATION] = (tracks[HC.X_ACCELERATION]**2 + tracks[HC.Y_ACCELERATION]**2)**0.5*NMeta.FEET_PER_METRE
 
         # Add lane ID:
-        tracks_NGSIMformat[NC.LANE_ID] = tracks[HC.LANE_ID]
+        # Reordering lane_id to start at the "fast lane" and end at the merge lanes, regardless of travel direction
+        tracks["new_LaneId"] = 0
+        min_lane_id = np.min(tracks[HC.LANE_ID].unique())
+        max_lane_id = np.max(tracks[HC.LANE_ID].unique())
 
+        if angle == np.pi/2:
+            new_lane = 1
+            for lane in np.arange(min_lane_id, max_lane_id+1):
+                tracks.loc[(tracks[HC.LANE_ID] == lane, "new_LaneId")] = new_lane
+                new_lane += 1
+        else:
+            new_lane = max_lane_id - min_lane_id + 1
+            for lane in np.arange(min_lane_id, max_lane_id+1):
+                tracks.loc[(tracks[HC.LANE_ID] == lane, "new_LaneId")] = new_lane
+                new_lane -= 1
+
+        tracks_NGSIMformat[NC.LANE_ID] = tracks["new_LaneId"]
+    
         # Add preceding and following IDs:
         tracks_NGSIMformat[NC.PRECEDING_ID] = tracks[HC.PRECEDING_ID]
         tracks_NGSIMformat[NC.FOLLOWING_ID] = tracks[HC.FOLLOWING_ID]
