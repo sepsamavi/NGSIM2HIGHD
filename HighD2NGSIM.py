@@ -9,18 +9,18 @@ class HighD2NGSIM:
     def __init__(self, highD_tracks_csv_num_list, highD_filedir):
         self.highD_filedir=highD_filedir
         self.highD_tracks_csv_num_list = highD_tracks_csv_num_list
-        self.highD_recordingMetas = []
-        self.highD_tracksMetas = []
-        self.highD_tracks = []
+        self.highD_recordingMetas = [None for _ in range(max(highD_tracks_csv_num_list))]
+        self.highD_tracksMetas = [None for _ in range(max(highD_tracks_csv_num_list))]
+        self.highD_tracks = [None for _ in range(max(highD_tracks_csv_num_list))]
 
     def convert(self):
         """ This method does things
         :return:
         """
         for ds_id in self.highD_tracks_csv_num_list:
-            self.highD_recordingMetas.append(pd.read_csv(self.highD_filedir+"{:02d}".format(ds_id)+"_recordingMeta.csv"))
-            self.highD_tracksMetas.append(pd.read_csv(self.highD_filedir+"{:02d}".format(ds_id)+"_tracksMeta.csv"))
-            self.highD_tracks.append(pd.read_csv(self.highD_filedir+"{:02d}".format(ds_id)+"_tracks.csv"))
+            self.highD_recordingMetas[ds_id-1] = pd.read_csv(self.highD_filedir+"{:02d}".format(ds_id)+"_recordingMeta.csv")
+            self.highD_tracksMetas[ds_id-1] = pd.read_csv(self.highD_filedir+"{:02d}".format(ds_id)+"_tracksMeta.csv")
+            self.highD_tracks[ds_id-1] = pd.read_csv(self.highD_filedir+"{:02d}".format(ds_id)+"_tracks.csv")
             print("Read {:02d}".format(ds_id))
             # print(self.highD_recordingMetas[ds_id-1].frameRate.iloc[0])
             right_tracks_NGSIMFormat, left_tracks_NGSIMFormat = self.transform_values(ds_id)
@@ -39,7 +39,6 @@ class HighD2NGSIM:
         # tracks['TimeIdx'] = pd.TimedeltaIndex(data=(tracks[HC.FRAME]-1) * 1/recordingMeta[HC.FRAME_RATE].iloc[0], unit='s', freq='infer')
         tracks["temp_TimeStamp"] = pd.to_datetime((tracks[HC.FRAME]-1) * 1/recordingMeta[HC.FRAME_RATE].iloc[0], unit="s")
         tracks["TimeStamp"] = (tracks[HC.FRAME] - 1) * 1 / recordingMeta[HC.FRAME_RATE].iloc[0]
-        tracks = tracks.set_index('temp_TimeStamp')
 
         # tracks['PeriodIdx'] = pd.PeriodIndex(tracks[HC.FRAME], freq="0.04s")
         right_tracks_ids = tracksMeta.loc[tracksMeta[HC.DRIVING_DIRECTION] == 2, HC.TRACK_ID].unique() # need to rotate pi/2 CCW
@@ -117,7 +116,7 @@ class HighD2NGSIM:
                 new_lane -= 1
 
         tracks_NGSIMformat[NC.LANE_ID] = tracks["new_LaneId"]
-    
+
         # Add preceding and following IDs:
         tracks_NGSIMformat[NC.PRECEDING_ID] = tracks[HC.PRECEDING_ID]
         tracks_NGSIMformat[NC.FOLLOWING_ID] = tracks[HC.FOLLOWING_ID]
@@ -132,8 +131,9 @@ class HighD2NGSIM:
         resampled_tracks = pd.DataFrame(columns=tracks.columns)
         for track_id, track in tracks.groupby(HC.TRACK_ID):
             # print("Track id: "+str(track_id))
+            # track.set_index('temp_TimeStamp')
             # Upsampling to interpolate at intervals of 0.02s, which is divisible by 0.1s
-            double_index = pd.date_range(start=pd.to_datetime(track["TimeStamp"].iloc[0],unit="s"), end=pd.to_datetime(track["TimeStamp"].iloc[-1],unit="s"), freq="20L")
+            double_index = np.arange(track.index[0], track.index[-1], step=0.5)
             upsampled_track = track.reindex(double_index)
             # interpolating to fill
             upsampled_track["TimeStamp"].interpolate(method='linear', inplace=True)
@@ -162,12 +162,32 @@ class HighD2NGSIM:
             upsampled_track[HC.RIGHT_ALONGSIDE_ID].fillna(method="bfill", inplace=True)
             upsampled_track[HC.RIGHT_FOLLOWING_ID].fillna(method="bfill", inplace=True)
             upsampled_track[HC.LANE_ID].fillna(method="bfill", inplace=True)
+            upsampled_track = upsampled_track.set_index(np.arange(0, upsampled_track.shape[0]))
+            # Removing leading frames and tailing frames, such that later downsampled frame numbers line up with NGSIM frame rate
+            NGSIM_ms = (1/NMeta.NGSIM_FRAME_RATE*1000) # periods of time where NGSIM will line up in milliseconds
+            starting_ts = upsampled_track["TimeStamp"].iloc[0]*1000 # milliseconds
+            ending_ts = upsampled_track["TimeStamp"].iloc[-1]*1000 # milliseconds
+            if (starting_ts % NGSIM_ms) == 0:
+                leading_rows_to_pop = int(0)
+            else:
+                leading_rows_to_pop = int((NGSIM_ms - (starting_ts % NGSIM_ms)) / 20) # find modulo of first ts and NGSIM_ms, subtract to get leading ms, divide by highD period to find number of rows to pop
+            trailing_rows_to_pop = int(-1 * (ending_ts % NGSIM_ms) / 20) - 1 # same idea for training rows
+            # print("leading_rows_to_pop: " +str(leading_rows_to_pop))
+            if leading_rows_to_pop > 0:
+                upsampled_track = upsampled_track.iloc[leading_rows_to_pop: , :] # pop leading rows
+            # print("trailing_rows_to_pop: " + str(trailing_rows_to_pop))
+            if abs(trailing_rows_to_pop) > 0:
+                upsampled_track = upsampled_track.iloc[:trailing_rows_to_pop, :] # pop trailing rows
+
             # Downsampling to NGSIM freq
-            new_index=pd.date_range(start=pd.to_datetime(track["TimeStamp"].iloc[0],unit="s"), end=pd.to_datetime(track["TimeStamp"].iloc[-1],unit="s"), freq=str(int(1/NMeta.NGSIM_FRAME_RATE*1000))+"L")
+            # new_index=pd.date_range(start=pd.to_datetime(upsampled_track["TimeStamp"].iloc[0],unit="s"), end=pd.to_datetime(upsampled_track["TimeStamp"].iloc[-1],unit="s"), freq=str(int(1/NMeta.NGSIM_FRAME_RATE*1000))+"L")
+            new_index=np.arange(upsampled_track.index[0], upsampled_track.index[-1]+1, 5)
+            # re_index to down sample
             resampled_track = upsampled_track.reindex(new_index)
+            resampled_track = resampled_track.set_index(np.arange(0, resampled_track.shape[0]))
             # Move track class from meta information to the actual track
             resampled_track[HC.CLASS] = tracksMeta.loc[(tracksMeta[HC.TRACK_ID] == track_id,HC.CLASS)].iloc[0]
-            resampled_track.set_index(np.arange(0,resampled_track.shape[0]))
+
             resampled_tracks = resampled_tracks.append(resampled_track, ignore_index=True)
         resampled_tracks["resampled_Frame_ID"] = pd.Series(resampled_tracks["TimeStamp"]*NMeta.NGSIM_FRAME_RATE, dtype=int)
 
