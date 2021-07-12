@@ -37,10 +37,8 @@ class HighD2NGSIM:
 
         # Adding a time for future re-sampling:
         # tracks['TimeIdx'] = pd.TimedeltaIndex(data=(tracks[HC.FRAME]-1) * 1/recordingMeta[HC.FRAME_RATE].iloc[0], unit='s', freq='infer')
-        tracks["temp_TimeStamp"] = pd.to_datetime((tracks[HC.FRAME]-1) * 1/recordingMeta[HC.FRAME_RATE].iloc[0], unit="s")
-        tracks["TimeStamp"] = (tracks[HC.FRAME] - 1) * 1 / recordingMeta[HC.FRAME_RATE].iloc[0]
+        tracks["TimeStamp"] = ((tracks[HC.FRAME] - 1)  / recordingMeta[HC.FRAME_RATE].iloc[0])#.astype(np.float64)
 
-        # tracks['PeriodIdx'] = pd.PeriodIndex(tracks[HC.FRAME], freq="0.04s")
         right_tracks_ids = tracksMeta.loc[tracksMeta[HC.DRIVING_DIRECTION] == 2, HC.TRACK_ID].unique() # need to rotate pi/2 CCW
         left_tracks_ids = tracksMeta.loc[tracksMeta[HC.DRIVING_DIRECTION] == 1, HC.TRACK_ID].unique() # need to rotate pi/2 CW
 
@@ -74,13 +72,15 @@ class HighD2NGSIM:
 
         ## Add rest of the relevant information in NGSIM format
         # Add vehicle ID - matching to track ID
-        tracks_NGSIMformat[NC.ID] = tracks[HC.TRACK_ID]
+        tracks_NGSIMformat[NC.ID] = tracks[HC.TRACK_ID].round(0).astype(int)
+
+        # NB we round floating point values that should be ints to counteract floating point errors
+        # Adding Global Time in milliseconds using the timestamp defined in seconds in resample function
+        tracks_NGSIMformat[NC.GLOBAL_TIME] = (tracks["TimeStamp"]*1000).round(0).astype(int)
 
         # Adding Frame_ID info: NB: using the resampled IDs
-        tracks_NGSIMformat[NC.FRAME] = tracks["resampled_Frame_ID"]
-
-        # Adding Global Time in milliseconds using the timestamp defined in seconds in resample function
-        tracks_NGSIMformat[NC.GLOBAL_TIME] = tracks["TimeStamp"]*1000
+        tracks_NGSIMformat[NC.FRAME] = (tracks_NGSIMformat[NC.GLOBAL_TIME]/100).round(0)
+        tracks_NGSIMformat[NC.FRAME] = tracks_NGSIMformat[NC.FRAME].round(0).astype(int)
 
         # Add width and length and convert to feet
         tracks_NGSIMformat[NC.WIDTH] = tracks[HC.HEIGHT]*NMeta.FEET_PER_METRE
@@ -115,7 +115,7 @@ class HighD2NGSIM:
                 tracks.loc[(tracks[HC.LANE_ID] == lane, "new_LaneId")] = new_lane
                 new_lane -= 1
 
-        tracks_NGSIMformat[NC.LANE_ID] = tracks["new_LaneId"]
+        tracks_NGSIMformat[NC.LANE_ID] = tracks["new_LaneId"].round(0).astype(int)
 
         # Add preceding and following IDs:
         tracks_NGSIMformat[NC.PRECEDING_ID] = tracks[HC.PRECEDING_ID]
@@ -128,17 +128,18 @@ class HighD2NGSIM:
     def resample(self, tracks, tracksMeta):
         # Resample each track in the groupby to the sampling rate of NGSIM
         # Return a new tracks dataframe
-        resampled_tracks = pd.DataFrame(columns=tracks.columns)
+        resampled_tracks = pd.DataFrame(columns=tracks.columns, dtype=tracks.dtypes[0])
         for track_id, track in tracks.groupby(HC.TRACK_ID):
             # print("Track id: "+str(track_id))
             # track.set_index('temp_TimeStamp')
             # Upsampling to interpolate at intervals of 0.02s, which is divisible by 0.1s
-            double_index = np.arange(track.index[0], track.index[-1], step=0.5)
+            double_index = np.arange(track.index[0], track.index[-1]-0.5, step=0.5) #NB need -0.5 to land at final index
             upsampled_track = track.reindex(double_index)
             # interpolating to fill
             upsampled_track["TimeStamp"].interpolate(method='linear', inplace=True)
+            upsampled_track["TimeStamp"] = upsampled_track["TimeStamp"].round(2)
             upsampled_track[HC.FRAME].interpolate(method='linear', inplace=True)
-            upsampled_track[HC.TRACK_ID].interpolate(method='linear', inplace=True)
+            upsampled_track[HC.FRAME] = upsampled_track[HC.FRAME].round(1)
             upsampled_track[HC.X].interpolate(method='linear', inplace=True)
             upsampled_track[HC.Y].interpolate(method='linear', inplace=True)
             upsampled_track[HC.WIDTH].interpolate(method='linear', inplace=True)
@@ -152,45 +153,40 @@ class HighD2NGSIM:
             upsampled_track[HC.DHW].interpolate(method='linear', inplace=True)
             upsampled_track[HC.THW].interpolate(method='linear', inplace=True)
             upsampled_track[HC.TTC].interpolate(method='linear', inplace=True)
-            upsampled_track[HC.PRECEDING_X_VELOCITY].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.PRECEDING_ID].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.FOLLOWING_ID].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.LEFT_PRECEDING_ID].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.LEFT_ALONGSIDE_ID].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.LEFT_FOLLOWING_ID].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.RIGHT_PRECEDING_ID].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.RIGHT_ALONGSIDE_ID].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.RIGHT_FOLLOWING_ID].fillna(method="bfill", inplace=True)
-            upsampled_track[HC.LANE_ID].fillna(method="bfill", inplace=True)
+
+            upsampled_track[HC.TRACK_ID].fillna(method='ffill', inplace=True)
+            upsampled_track[HC.TRACK_ID] = upsampled_track[HC.TRACK_ID].round(0).astype(int)
+            upsampled_track[HC.PRECEDING_X_VELOCITY].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.PRECEDING_ID].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.FOLLOWING_ID].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.LEFT_PRECEDING_ID].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.LEFT_ALONGSIDE_ID].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.LEFT_FOLLOWING_ID].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.RIGHT_PRECEDING_ID].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.RIGHT_ALONGSIDE_ID].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.RIGHT_FOLLOWING_ID].fillna(method="ffill", inplace=True)
+            upsampled_track[HC.LANE_ID].fillna(method="ffill", inplace=True)
             upsampled_track = upsampled_track.set_index(np.arange(0, upsampled_track.shape[0]))
             # Removing leading frames and tailing frames, such that later downsampled frame numbers line up with NGSIM frame rate
-            NGSIM_ms = (1/NMeta.NGSIM_FRAME_RATE*1000) # periods of time where NGSIM will line up in milliseconds
-            starting_ts = upsampled_track["TimeStamp"].iloc[0]*1000 # milliseconds
-            ending_ts = upsampled_track["TimeStamp"].iloc[-1]*1000 # milliseconds
+            NGSIM_ms = int(1/NMeta.NGSIM_FRAME_RATE*1000) # periods of time where NGSIM will line up in milliseconds
+            starting_ts = int(round(upsampled_track["TimeStamp"].iloc[0]*1000))# milliseconds
+            ending_ts = int(round(upsampled_track["TimeStamp"].iloc[-1]*1000)) # milliseconds
             if (starting_ts % NGSIM_ms) == 0:
                 leading_rows_to_pop = int(0)
             else:
-                leading_rows_to_pop = int((NGSIM_ms - (starting_ts % NGSIM_ms)) / 20) # find modulo of first ts and NGSIM_ms, subtract to get leading ms, divide by highD period to find number of rows to pop
-            trailing_rows_to_pop = int(-1 * (ending_ts % NGSIM_ms) / 20) - 1 # same idea for training rows
-            # print("leading_rows_to_pop: " +str(leading_rows_to_pop))
+                leading_rows_to_pop = int(round((NGSIM_ms - (starting_ts % NGSIM_ms)) / 20) )# find modulo of first ts and NGSIM_ms, subtract to get leading ms, divide by highD period to find number of rows to pop
+            trailing_rows_to_pop = int(round(-1 * (ending_ts % NGSIM_ms) / 20)) # same idea for training rows
             if leading_rows_to_pop > 0:
                 upsampled_track = upsampled_track.iloc[leading_rows_to_pop: , :] # pop leading rows
-            # print("trailing_rows_to_pop: " + str(trailing_rows_to_pop))
             if abs(trailing_rows_to_pop) > 0:
                 upsampled_track = upsampled_track.iloc[:trailing_rows_to_pop, :] # pop trailing rows
 
             # Downsampling to NGSIM freq
-            # new_index=pd.date_range(start=pd.to_datetime(upsampled_track["TimeStamp"].iloc[0],unit="s"), end=pd.to_datetime(upsampled_track["TimeStamp"].iloc[-1],unit="s"), freq=str(int(1/NMeta.NGSIM_FRAME_RATE*1000))+"L")
             new_index=np.arange(upsampled_track.index[0], upsampled_track.index[-1]+1, 5)
             # re_index to down sample
             resampled_track = upsampled_track.reindex(new_index)
             resampled_track = resampled_track.set_index(np.arange(0, resampled_track.shape[0]))
-            # Move track class from meta information to the actual track
+
             resampled_track[HC.CLASS] = tracksMeta.loc[(tracksMeta[HC.TRACK_ID] == track_id,HC.CLASS)].iloc[0]
-
             resampled_tracks = resampled_tracks.append(resampled_track, ignore_index=True)
-        resampled_tracks["resampled_Frame_ID"] = pd.Series(resampled_tracks["TimeStamp"]*NMeta.NGSIM_FRAME_RATE, dtype=int)
-
         return resampled_tracks
-        # resampled_tracks.to_csv(self.highD_filedir + "together.csv")
-        #Generate new Frame IDs:
