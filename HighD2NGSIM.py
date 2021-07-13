@@ -4,7 +4,7 @@ import HighD_Columns as HC
 import NGSIM_Columns as NC
 import NGSIM_MetaInfo as NMeta
 # NC_LIST =[NC.ID,  NC.FRAME,  NC.TOTAL_FRAME,  NC.GLOBAL_TIME,  NC.X,  NC.Y,  NC.GLOBAL_X,  NC.GLOBAL_Y,  NC.LENGTH,  NC.WIDTH,  NC.CLASS,  NC.VELOCITY,  NC.ACCELERATION,  NC.LANE_ID,  NC.PRECEDING_ID,  NC.FOLLOWING_ID,  NC.LOCATION,  NC.O_ZONE,  NC.D_ZONE,  NC.INT_ID,  NC.SECTION_ID,  NC.DIRECTION,  NC.MOVEMENT,  NC.DHW, NC.THW]
-NC_LIST =[NC.ID,  NC.FRAME,   NC.X,  NC.Y,  NC.LENGTH,  NC.WIDTH,  NC.CLASS,  NC.VELOCITY,  NC.ACCELERATION,  NC.LANE_ID,  NC.PRECEDING_ID,  NC.FOLLOWING_ID]
+NC_LIST =[NC.ID,  NC.FRAME, NC.GLOBAL_TIME, NC.X,  NC.Y,  NC.LENGTH,  NC.WIDTH,  NC.CLASS,  NC.VELOCITY,  NC.ACCELERATION,  NC.LANE_ID,  NC.PRECEDING_ID,  NC.FOLLOWING_ID]
 class HighD2NGSIM:
     def __init__(self, highD_tracks_csv_num_list, highD_filedir):
         self.highD_filedir=highD_filedir
@@ -25,8 +25,8 @@ class HighD2NGSIM:
             # print(self.highD_recordingMetas[ds_id-1].frameRate.iloc[0])
             right_tracks_NGSIMFormat, left_tracks_NGSIMFormat = self.transform_values(ds_id)
 
-            right_tracks_NGSIMFormat.to_csv(self.highD_filedir+"NGSIMFormat/DS{:02d}".format(ds_id)+"_right.csv")
-            left_tracks_NGSIMFormat.to_csv(self.highD_filedir+"NGSIMFormat/DS{:02d}".format(ds_id)+"_left.csv")
+            right_tracks_NGSIMFormat.to_csv(self.highD_filedir+"NGSIMFormat/DS{:02d}".format(ds_id)+"_right.csv", index=False)
+            left_tracks_NGSIMFormat.to_csv(self.highD_filedir+"NGSIMFormat/DS{:02d}".format(ds_id)+"_left.csv", index=False)
 
         return
 
@@ -50,24 +50,30 @@ class HighD2NGSIM:
         left_resampled_tracks = self.resample(left_tracks, tracksMeta)
 
         # Rotate tracks to match NGSIM and
-        right_rotated_tsfd = self.rotate_tsf_tracks(right_resampled_tracks, np.pi/2)
-        left_rotated_tsfd = self.rotate_tsf_tracks(left_resampled_tracks, -np.pi/2)
+        right_rotated_tsfd = self.rotate_tsf_tracks(right_resampled_tracks, np.pi/2, True)
+        left_rotated_tsfd = self.rotate_tsf_tracks(left_resampled_tracks, -np.pi/2, False)
 
         return right_rotated_tsfd, left_rotated_tsfd
 
-    def rotate_tsf_tracks(self, tracks, angle):
+    def rotate_tsf_tracks(self, tracks, angle, right_tracks):
         # Change locations
         # Move point from upper left corner in image coordinates to the middle front of the car
         tracks_NGSIMformat = pd.DataFrame(columns=NC_LIST)
-        if angle == np.pi/2:
+        if right_tracks:
             tracks_X_Temp = tracks[HC.X]+tracks[HC.WIDTH]
         else:
             tracks_X_Temp = tracks[HC.X]
-        tracks_Y_Temp = tracks[HC.Y]-0.5*tracks[HC.HEIGHT]
+        tracks_Y_Temp = tracks[HC.Y]+0.5*tracks[HC.HEIGHT]
 
         # Rotate with respect to Image coordinates and convert to feet, use NGSIM title
-        tracks_NGSIMformat[NC.X] = (tracks_X_Temp*np.cos(angle) - tracks_Y_Temp*np.sin(angle))*NMeta.FEET_PER_METRE
-        tracks_NGSIMformat[NC.Y] = (tracks_X_Temp*np.sin(angle) + tracks_Y_Temp*np.cos(angle))*NMeta.FEET_PER_METRE
+        if right_tracks:
+            # Since highD has a left-handed frame, switch x,y. Tracks going right (ie increasing x) in highD format will now go increasing y in NGSIM format
+            tracks_NGSIMformat[NC.X] = tracks_Y_Temp*NMeta.FEET_PER_METRE
+            tracks_NGSIMformat[NC.Y] = tracks_X_Temp*NMeta.FEET_PER_METRE
+        else:
+            # Since highD has a left-handed frame, switch x,y then rotate 180 degrees to go in direction of increasing y in NGSIM format
+            tracks_NGSIMformat[NC.X] = (tracks_Y_Temp * np.cos(np.pi) - tracks_X_Temp * np.sin(np.pi))*NMeta.FEET_PER_METRE
+            tracks_NGSIMformat[NC.Y] = (tracks_Y_Temp * np.sin(np.pi) + tracks_X_Temp * np.cos(np.pi))*NMeta.FEET_PER_METRE
 
 
         ## Add rest of the relevant information in NGSIM format
@@ -104,7 +110,7 @@ class HighD2NGSIM:
         min_lane_id = np.min(tracks[HC.LANE_ID].unique())
         max_lane_id = np.max(tracks[HC.LANE_ID].unique())
 
-        if angle == np.pi/2:
+        if right_tracks:
             new_lane = 1
             for lane in np.arange(min_lane_id, max_lane_id+1):
                 tracks.loc[(tracks[HC.LANE_ID] == lane, "new_LaneId")] = new_lane
@@ -118,8 +124,8 @@ class HighD2NGSIM:
         tracks_NGSIMformat[NC.LANE_ID] = tracks["new_LaneId"].round(0).astype(int)
 
         # Add preceding and following IDs:
-        tracks_NGSIMformat[NC.PRECEDING_ID] = tracks[HC.PRECEDING_ID]
-        tracks_NGSIMformat[NC.FOLLOWING_ID] = tracks[HC.FOLLOWING_ID]
+        tracks_NGSIMformat[NC.PRECEDING_ID] = tracks[HC.PRECEDING_ID].round(0).astype(int)
+        tracks_NGSIMformat[NC.FOLLOWING_ID] = tracks[HC.FOLLOWING_ID].round(0).astype(int)
 
         return tracks_NGSIMformat
 
